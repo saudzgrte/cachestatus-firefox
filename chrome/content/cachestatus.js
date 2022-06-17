@@ -34,82 +34,154 @@
  *
  * ***** END LICENSE BLOCK ***** */
 
+
+try {
+    Components.utils.import("resource://gre/modules/DownloadUtils.jsm");
+    Components.utils.import("resource://gre/modules/LoadContextInfo.jsm");
+} catch (e) {}
+ 
 function cs_updated_stat( type, aDeviceInfo, prefs ) {
-    var current = round_memory_usage( aDeviceInfo.totalSize/1024/1024 );
-    var max = round_memory_usage( aDeviceInfo.maximumSize/1024/1024 );
+    var current = aDeviceInfo.totalSize;
+    var max = aDeviceInfo.maximumSize;
+    
     var cs_id = 'cachestatus';
     var bool_pref_key = 'auto_clear';
     var int_pref_key = 'ac';
     var clear_directive;
-    if ( type == 'memory' ) {
+    if ( type == 'memory' || type == 'memory2' ) {
         cs_id += '-ram-label';
         bool_pref_key += '_ram';
         int_pref_key += 'r_percent';
         clear_directive = 'ram';
-        // this is some sort of random bug workaround
-        if ( current > max && current == 4096 ) {
-            current = 0;
+        if (type == 'memory') {
+          // this is some sort of random bug workaround
+          if ( current > max && current == 4096 ) {
+              current = 0;
+          }
+          cs_updated_stat.memory = current;
+          cs_updated_stat.maxmemory = max;
         }
-    } else if ( type == 'disk' ) {
+        else {
+          cs_updated_stat.memory2 = current;
+        }
+        
+        current = (cs_updated_stat.memory || 0) + (cs_updated_stat.memory2 || 0);
+        max =  cs_updated_stat.maxmemory;
+        if (!max) {
+          try {
+            max = Components.classes["@mozilla.org/preferences-service;1"]
+              .getService(Components.interfaces.nsIPrefService)
+              .getBranch( "" )
+              .getIntPref( 'browser.cache.memory.capacity' );
+          } catch (e) {
+            max = "-";
+          }
+        }
+    } else if ( type == 'disk' || type == 'disk2' ) {
         cs_id += '-hd-label';
         bool_pref_key += '_disk';
         int_pref_key += 'd_percent';
         clear_directive = 'disk';
+        if (type == 'disk') {
+          cs_updated_stat.disk = current;
+          cs_updated_stat.maxdisk = max;
+        }
+        else {
+          cs_updated_stat.disk2 = current;
+        }
+        
+        current = (cs_updated_stat.disk || 0) + (cs_updated_stat.disk2 || 0);
+        max =  cs_updated_stat.maxdisk;
+        if (!max) {
+          try {
+            max = Components.classes["@mozilla.org/preferences-service;1"]
+              .getService(Components.interfaces.nsIPrefService)
+              .getBranch( "" )
+              .getIntPref( 'browser.cache.disk.capacity' );
+          } catch (e) {
+            max = "-";
+          }
+        }
     } else {
         // offline ... or something else we don't manage
         return;
     }
-
-/*
-dump( 'type: ' + type + ' - aDeviceInfo' + aDeviceInfo );
-    // do we need to auto-clear?
-dump( "evaling if we need to auto_clear...\n" );
-dump( bool_pref_key + ": " + prefs.getBoolPref( bool_pref_key ) + " and " +
-        (( current/max )*100) + " > " +
-        prefs.getIntPref( int_pref_key ) + "\n" );
-dump( "new min level: " + prefs.getIntPref( int_pref_key )*.01*max + " > 10\n" );
-*/
-
-    /*
-     This is being disabled for now:
-     http://code.google.com/p/cachestatus/issues/detail?id=10
-    */
-    /*
-    if (
-        prefs.getBoolPref( bool_pref_key ) &&
-        prefs.getIntPref( int_pref_key )*.01*max > 10 &&
-        (( current/max )*100) > prefs.getIntPref( int_pref_key )
-       ) {
-//dump( "clearing!\n" );
-        cs_clear_cache( clear_directive, 1 );
-        current = 0;
-    }
-    */
-
     // Now, update the status bar label...
+    if (parseInt(current)) {
+      current = DownloadUtils.convertByteUnits(current).join(" ");
+    }
+    if (parseInt(max)) {
+      max = DownloadUtils.convertByteUnits(max).join(" ");
+    }
+            
     var wm = Components.classes["@mozilla.org/appshell/window-mediator;1"]
         .getService(Components.interfaces.nsIWindowMediator);
-    var win = wm.getMostRecentWindow("navigator:browser");
-    if (win) {
-        win.document.getElementById(cs_id).setAttribute(
-            'value', current + " MB / " + max + " MB " );
+    var enumerator = wm.getEnumerator("navigator:browser");
+    while(enumerator.hasMoreElements()) {
+        var win = enumerator.getNext();
+        if (win) {
+            win.document.getElementById(cs_id).setAttribute(
+                'value', current + " / " + max );
+        }
     }
 }
 
 function update_cache_status() {
     var cache_service = Components.classes["@mozilla.org/network/cache-service;1"]
         .getService(Components.interfaces.nsICacheService);
-    var prefService = Components.classes["@mozilla.org/preferences-service;1"].getService(Components.interfaces.nsIPrefService);
+    var prefService = Components.classes["@mozilla.org/preferences-service;1"]
+        .getService(Components.interfaces.nsIPrefService);
     var prefs  = prefService.getBranch("extensions.cachestatus.");
-
+    //Cache 1
     var cache_visitor = {
         visitEntry: function(a,b) {},
         visitDevice: function( device, aDeviceInfo ) {
             cs_updated_stat( device, aDeviceInfo, prefs );
         }
     }
-
     cache_service.visitEntries( cache_visitor );
+    //Cache 2
+    // pref: browser.cache.use_new_backend = 1
+    try {
+      var cache2_service = Components.classes["@mozilla.org/netwerk/cache-storage-service;1"]
+        .getService(Components.interfaces.nsICacheStorageService);
+    }
+    catch (e) {
+      return;
+    }
+    if (cache_service.cacheIOTarget == cache2_service.ioTarget) return;
+
+    // chrome://browser/content/preferences/advanced.js
+    function Visitor(expected, device) {
+      this.expected = expected;
+      this.device = device;
+    }
+    Visitor.prototype = {
+      expected: 0,
+      sum: 0,
+      QueryInterface: function listener_qi(iid) {
+        if (iid.equals(Ci.nsISupports) ||
+            iid.equals(Ci.nsICacheStorageVisitor)) {
+          return this;
+        }
+        throw Components.results.NS_ERROR_NO_INTERFACE;
+      },
+      onCacheStorageInfo: function(num, consumption)
+      {
+        this.sum += consumption;
+        if (!--this.expected) {
+          cs_updated_stat( this.device, {totalSize: this.sum}, prefs );
+        }
+      }
+    };
+ 
+    var visitor = new Visitor(2, "disk2");
+    cache2_service.diskCacheStorage(LoadContextInfo.default, false).asyncVisitStorage(visitor, false);
+    cache2_service.diskCacheStorage(LoadContextInfo.anonymous, false).asyncVisitStorage(visitor, false);
+
+    var visitor2 = new Visitor(2, "memory2");
+    cache2_service.memoryCacheStorage(LoadContextInfo.default, false).asyncVisitStorage(visitor2, false);
+    cache2_service.memoryCacheStorage(LoadContextInfo.anonymous, false).asyncVisitStorage(visitor2, false);
 }
 
 /*
@@ -129,11 +201,17 @@ function round_memory_usage( memory ) {
 function cs_clear_cache( param, noupdate ) {
     var cacheService = Components.classes["@mozilla.org/network/cache-service;1"]
         .getService(Components.interfaces.nsICacheService);
+        
     if ( param && param == 'ram' ) {
         cacheService.evictEntries(Components.interfaces.nsICache.STORE_IN_MEMORY);
     } else if ( param && param == 'disk' ) {
         cacheService.evictEntries(Components.interfaces.nsICache.STORE_ON_DISK);
-    } else {
+    }  else if ( param && param == 'cache2' ) {
+        Components.classes["@mozilla.org/netwerk/cache-storage-service;1"]
+                  .getService(Components.interfaces.nsICacheStorageService)
+                  .clear();
+    } 
+    else {
         cacheService.evictEntries(Components.interfaces.nsICache.STORE_ON_DISK);
         cacheService.evictEntries(Components.interfaces.nsICache.STORE_IN_MEMORY);
     }
@@ -163,10 +241,22 @@ var csExtension = {
     {
         var prefService = Components.classes["@mozilla.org/preferences-service;1"].getService(Components.interfaces.nsIPrefService);
         this._prefs  = prefService.getBranch("extensions.cachestatus.");
+        
+        if (this._prefs.getBoolPref( 'use_statusbar' )) {
+          var statusbar = document.getElementById('status-bar');
+          var showOnStatus = statusbar && statusbar.parentNode && statusbar.parentNode.clientHeight;
+          showOnStatus = showOnStatus || this._prefs.getBoolPref( 'forced_on_statusbar' );
+          if (showOnStatus) {
+            try {
+              statusbar.appendChild(document.getElementById('cachestatus-panel'));
+            } catch (e) {}
+          }
+        }
+
         if ( this._prefs.getBoolPref( 'auto_update' ) ) {
             var appcontent = document.getElementById( 'appcontent' );
             if ( appcontent )
-            	appcontent.addEventListener( "DOMContentLoaded", this.onPageLoad, true );
+              appcontent.addEventListener( "DOMContentLoaded", this.onPageLoad, true );
         }
         this._branch = this._prefs;
         this._branch.QueryInterface(Components.interfaces.nsIPrefBranch2);
